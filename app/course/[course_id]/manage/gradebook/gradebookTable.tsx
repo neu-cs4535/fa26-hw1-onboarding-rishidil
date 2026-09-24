@@ -20,6 +20,7 @@ import {
   useAreAllDependenciesReleased,
   useGradebookColumn,
   useGradebookColumnGrades,
+  useGradebookColumnGroups,
   useGradebookColumns,
   useGradebookController,
   useGradebookRefetchStatus,
@@ -224,6 +225,7 @@ type GradebookGroupedColumnRef = {
   sort_order: GradebookColumn["sort_order"];
   name: GradebookColumn["name"];
   max_score: GradebookColumn["max_score"];
+  group_id: GradebookColumn["group_id"];
 };
 
 /** Build left-to-right "units": each is a block of DB column ids. Collapsed groups = one unit (whole group). */
@@ -244,16 +246,9 @@ function buildVisibleReorderUnits(args: {
       units.push([colId]);
       continue;
     }
-    const slugParts = col.slug.split("-");
-    let baseGroupName: string;
-    if (slugParts[0] === "assignment" && slugParts.length >= 3) {
-      baseGroupName = `${slugParts[0]}-${slugParts[1]}`;
-    } else {
-      baseGroupName = slugParts[0] || "other";
-    }
-    const groupEntry = Object.entries(groupedColumns).find(
-      ([key, group]) => key.startsWith(baseGroupName) && group.columns.some((c) => c.id === colId)
-    );
+    // A column belongs to exactly one group, so finding it by id is enough. This used to also
+    // test `key.startsWith(<slug prefix>)`, which could only ever exclude the right answer.
+    const groupEntry = Object.entries(groupedColumns).find(([, group]) => group.columns.some((c) => c.id === colId));
     if (!groupEntry || groupEntry[1].columns.length <= 1) {
       units.push([colId]);
       continue;
@@ -2548,71 +2543,54 @@ export default function GradebookTable() {
     slug: col.slug,
     sort_order: col.sort_order,
     name: col.name,
-    max_score: col.max_score
+    max_score: col.max_score,
+    group_id: col.group_id
   }));
   columnsForGrouping.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
   const cachedColumnsKey = JSON.stringify(columnsForGrouping);
-  // Group gradebook columns by slug prefix, with special handling for assignment sub-groups
+  const columnGroups = useGradebookColumnGroups();
+  // Same trick as cachedColumnsKey: the controller hands back a fresh array on every render,
+  // so memoise on the content rather than the identity.
+  const cachedGroupsKey = JSON.stringify(
+    columnGroups.map((g) => ({ id: g.id, group_key: g.group_key, name: g.name, sort_order: g.sort_order }))
+  );
+  // Group gradebook columns by their stored group. Grouping used to be derived here by
+  // splitting `slug` on "-" and watching for breaks in sort_order; it is now a table, written
+  // once by 20260924210008_add_gradebook_column_groups.sql. No slug is parsed at render time.
   const groupedColumns = useMemo(() => {
     const groups: Record<string, { groupName: string; columns: typeof columnsForGrouping }> = {};
     const columns = JSON.parse(cachedColumnsKey) as typeof columnsForGrouping;
+    const groupRows = JSON.parse(cachedGroupsKey) as {
+      id: number;
+      group_key: string;
+      name: string;
+      sort_order: number;
+    }[];
 
     columns.sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
 
-    let currentGroupKey = "";
-    let currentGroupIndex = 0;
-    let lastSortOrder = -1;
+    const groupsById = new Map(groupRows.map((g) => [g.id, g]));
 
     columns.forEach((col) => {
-      const slugParts = col.slug.split("-");
-      let baseGroupName: string;
+      const group = col.group_id === null ? undefined : groupsById.get(col.group_id);
 
-      // Special handling for assignment columns
-      if (slugParts[0] === "assignment" && slugParts.length >= 3) {
-        // For assignment-assignment-*, assignment-lab-*, etc., use "assignment-{type}" as the base group
-        baseGroupName = `${slugParts[0]}-${slugParts[1]}`;
-      } else {
-        // For all other columns, use the first part as the base group
-        baseGroupName = slugParts[0] || "other";
-      }
-
-      // Check if this column is contiguous with the previous one
-      const currentSortOrder = col.sort_order ?? 0;
-      const isContiguous = lastSortOrder === -1 || currentSortOrder === lastSortOrder + 1;
-
-      // If not contiguous or different prefix, start a new group
-      if (!isContiguous || baseGroupName !== currentGroupKey) {
-        currentGroupKey = baseGroupName;
-        currentGroupIndex++;
-      }
-
-      const groupKey = `${baseGroupName}-${currentGroupIndex}`;
+      // A column with no group -- one created after the backfill ran -- stands on its own,
+      // keyed by its id so it can never collide with a stored group_key. The table draws no
+      // header for a group of one, so this renders exactly as an ungrouped column should.
+      const groupKey = group ? group.group_key : `ungrouped-${col.id}`;
 
       if (!groups[groupKey]) {
-        // Format group name for display
-        let displayName: string;
-        if (baseGroupName === "other") {
-          displayName = "Other";
-        } else if (baseGroupName.startsWith("assignment-")) {
-          // For assignment sub-groups, capitalize and format nicely
-          const subType = baseGroupName.split("-")[1];
-          displayName = `${subType.charAt(0).toUpperCase() + subType.slice(1)}`;
-        } else {
-          displayName = baseGroupName.charAt(0).toUpperCase() + baseGroupName.slice(1);
-        }
-
         groups[groupKey] = {
-          groupName: displayName,
+          groupName: group ? group.name : col.name,
           columns: []
         };
       }
 
       groups[groupKey].columns.push(col);
-      lastSortOrder = currentSortOrder;
     });
 
     return groups;
-  }, [cachedColumnsKey]);
+  }, [cachedColumnsKey, cachedGroupsKey]);
 
   // Initialize all groups as collapsed by default, but preserve existing collapsed state
   useEffect(() => {
@@ -3266,10 +3244,8 @@ export default function GradebookTable() {
         i++;
         continue;
       }
-      const prefix = column.slug.split("-")[0];
-      const baseGroupName = prefix || "other";
-      const groupEntry = Object.entries(groupedColumns).find(
-        ([key, group]) => key.startsWith(baseGroupName) && group.columns.some((col) => col.id === columnId)
+      const groupEntry = Object.entries(groupedColumns).find(([, group]) =>
+        group.columns.some((col) => col.id === columnId)
       );
       if (!groupEntry || groupEntry[1].columns.length <= 1) {
         pos += getColWidth(leaf.id);
@@ -3315,11 +3291,8 @@ export default function GradebookTable() {
         const column = gradebookColumns.find((col) => col.id === columnId);
 
         if (column) {
-          const prefix = column.slug.split("-")[0];
-          const baseGroupName = prefix || "other";
-
-          const groupEntry = Object.entries(groupedColumns).find(
-            ([key, group]) => key.startsWith(baseGroupName) && group.columns.some((col) => col.id === columnId)
+          const groupEntry = Object.entries(groupedColumns).find(([, group]) =>
+            group.columns.some((col) => col.id === columnId)
           );
 
           if (groupEntry && groupEntry[1].columns.length > 1) {

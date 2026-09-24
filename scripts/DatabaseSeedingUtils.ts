@@ -4900,6 +4900,21 @@ export class DatabaseSeeder {
     if (config.columnGroupFixtures) {
       await this.createColumnGroupFixtures(class_id, students);
     }
+
+    // `supabase db reset` replays migrations against an empty database, so the one-time
+    // recovery in 20260924210008_add_gradebook_column_groups.sql finds no gradebooks to group.
+    // Every column above was created after it ran, which would leave the whole gradebook
+    // ungrouped and the table rendering one singleton per column. Recover the grouping through
+    // the very same function the migration calls, so seeded data and migrated data are
+    // identical rather than merely similar. It only touches gradebooks that have no groups yet,
+    // so it is a no-op if something already grouped them.
+    const { data: groupsCreated, error: backfillError } = await supabase.rpc("backfill_gradebook_column_groups", {
+      p_class_id: class_id
+    });
+    if (backfillError) {
+      throw new Error(`Failed to group gradebook columns for class ${class_id}: ${backfillError.message}`);
+    }
+    console.log(`   Grouped gradebook columns into ${groupsCreated ?? 0} group(s)`);
   }
 
   // Helper method to create specification grading scheme columns

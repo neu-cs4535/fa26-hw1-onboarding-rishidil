@@ -124,6 +124,9 @@ const TABLE_TO_CHANNEL_MAP: Partial<Record<TablesThatHaveAnIDField, ChannelType[
   discussion_threads: ["staff", "students", "discussion_thread_root"],
   discussion_topics: ["staff", "students"],
   gradebook_columns: ["staff", "students"],
+  // Groups are written once, by the migration that introduced them and by the seeder, and
+  // there is no UI that edits them yet. Nothing broadcasts changes, so nothing to subscribe to.
+  gradebook_column_groups: [],
   gradebook_column_students: ["staff", "user"], // Also to individual users when not private
   help_queue_assignments: ["help_queue"],
   help_queues: ["help_queue"],

@@ -896,3 +896,9 @@ BEGIN
         FALSE
     );
 END $$;
+
+-- This file runs after the migrations during `supabase db reset`, so the one-time recovery in
+-- 20260924210008_add_gradebook_column_groups.sql has already run by the time the demo class
+-- above exists, and its gradebook column would otherwise be left ungrouped. Group it through
+-- the same function the migration and the seeder use. No-op for gradebooks already grouped.
+SELECT public.backfill_gradebook_column_groups();
