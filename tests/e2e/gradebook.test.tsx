@@ -871,6 +871,16 @@ test.describe("Gradebook Page - Comprehensive", () => {
     await expect(page.getByRole("button", { name: "Import Columns" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Add Column" })).toBeVisible();
 
+    // The four assignment columns are one stored group, collapsed by default, so expand before
+    // reading them. Assignment 1 used to be visible here only by accident: the old slug heuristic
+    // sorted the code-walk column (sort_order NULL, treated as 0) beside it and split it off as a
+    // group of one, which never collapses.
+    await page
+      .getByRole("region", { name: "Instructor Gradebook Table" })
+      .getByRole("button", { name: "Expand all groups" })
+      .click();
+    await waitForVirtualizerIdle(page);
+
     // Check that Student 1's assignments are showing grades, final grade is calculated
     await expect(async () => {
       const after = await readCellNumber(page, students[0].private_profile_name, "Test Assignment 1 (Group)");
