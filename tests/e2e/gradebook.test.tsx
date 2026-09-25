@@ -1739,3 +1739,143 @@ test.describe("Gradebook column reorder (issue #531)", () => {
     }).toPass({ timeout: 5000 });
   });
 });
+
+/**
+ * Column groups as instructor-editable data: create, rename, reorder and delete a group, and move
+ * a column between groups. Backed by 20260924233000_gradebook_column_group_crud.sql. Its own class
+ * for the same reason as the reorder suite above.
+ */
+test.describe("Gradebook column group CRUD", () => {
+  test.describe.configure({ mode: "serial" });
+  test.setTimeout(180_000);
+
+  let groupsCourse: Course;
+  let groupsInstructor: TestingUser;
+
+  test.beforeAll(async () => {
+    const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    groupsCourse = await createClass({ name: `Gradebook Groups E2E ${id}` });
+    const users = await createUsersInClass([
+      {
+        name: "Groups Student",
+        email: `groups-student-${id}@pawtograder.net`,
+        role: "student",
+        class_id: groupsCourse.id,
+        useMagicLink: true
+      },
+      {
+        name: "Groups Instructor",
+        email: `groups-instructor-${id}@pawtograder.net`,
+        role: "instructor",
+        class_id: groupsCourse.id,
+        useMagicLink: true
+      }
+    ]);
+    groupsInstructor = users[1];
+    await createAssignmentsAndGradebookColumns({
+      class_id: groupsCourse.id,
+      numAssignments: 3,
+      numManualGradedColumns: 0,
+      manualGradedColumnSlugs: ["participation"],
+      groupConfig: "individual"
+    });
+  });
+
+  async function columnRow(name: string) {
+    const { data } = await supabase
+      .from("gradebook_columns")
+      .select("id, sort_order, group_id")
+      .eq("class_id", groupsCourse.id)
+      .eq("name", name)
+      .single();
+    return data!;
+  }
+
+  test("create, rename, reorder and delete a group; move a column between groups", async ({ page }) => {
+    await loginAsUser(page, groupsInstructor, groupsCourse);
+    await page.goto(`/course/${groupsCourse.id}/manage/gradebook`);
+    const region = page.getByRole("region", { name: "Instructor Gradebook Table" });
+    await expect(region.getByRole("button", { name: "Expand all groups" })).toBeVisible({ timeout: 60_000 });
+    await region.getByRole("button", { name: "Expand all groups" }).click();
+    await waitForVirtualizerIdle(page);
+
+    // Create: Participation starts in its own backfilled group; put it in a new one.
+    const participationHeader = region
+      .locator("thead tr")
+      .filter({ has: page.locator("th").filter({ hasText: "Student Name" }) })
+      .locator("[data-col-id]")
+      .filter({ hasText: "Participation" });
+    await participationHeader.getByRole("button", { name: "Column options" }).click();
+    await page.getByRole("menuitem", { name: "Change group…" }).click();
+    await page.getByLabel("Column group").selectOption({ label: "New group…" });
+    await page.getByLabel("New group name").fill("Engagement");
+    await page.getByRole("dialog").getByRole("button", { name: "Save" }).click();
+    await expect(page.getByText('Created group "Engagement"').first()).toBeAttached();
+
+    const participation = await columnRow("Participation");
+    const { data: created } = await supabase
+      .from("gradebook_column_groups")
+      .select("id, name")
+      .eq("id", participation.group_id!)
+      .single();
+    expect(created!.name).toBe("Engagement");
+
+    // Assign: move Test Assignment 3 out of the Assignment group into Engagement.
+    const assignment3Before = await columnRow("Test Assignment 3");
+    const assignmentGroupId = assignment3Before.group_id!;
+    const a3Header = region
+      .locator("thead tr")
+      .filter({ has: page.locator("th").filter({ hasText: "Student Name" }) })
+      .locator("[data-col-id]")
+      .filter({ hasText: "Test Assignment 3" });
+    await a3Header.scrollIntoViewIfNeeded();
+    await a3Header.getByRole("button", { name: "Column options" }).click();
+    await page.getByRole("menuitem", { name: "Change group…" }).click();
+    await page.getByLabel("Column group").selectOption({ label: "Engagement" });
+    await page.getByRole("dialog").getByRole("button", { name: "Save" }).click();
+    await expect(page.getByText("Column moved to group").first()).toBeAttached();
+    await expect(async () => {
+      expect((await columnRow("Test Assignment 3")).group_id).toBe(created!.id);
+    }).toPass({ timeout: 5_000 });
+
+    // Rename, reorder and delete from the Column Groups dialog.
+    await page.getByRole("button", { name: "Column Groups" }).click();
+    const nameInput = page.getByLabel("Name of group Engagement");
+    await nameInput.fill("Participation & Labs");
+    await nameInput.press("Enter");
+    await expect(async () => {
+      const { data } = await supabase.from("gradebook_column_groups").select("name").eq("id", created!.id).single();
+      expect(data!.name).toBe("Participation & Labs");
+    }).toPass({ timeout: 10_000 });
+
+    // Reorder: moving the group left keeps every member in it.
+    const membersBefore = (
+      await supabase.from("gradebook_columns").select("id").eq("group_id", created!.id).order("id")
+    ).data!.map((r) => r.id);
+    const participationOrderBefore = (await columnRow("Participation")).sort_order!;
+    await page.getByRole("button", { name: "Move group Participation & Labs left" }).click();
+    await expect(async () => {
+      expect((await columnRow("Participation")).sort_order!).toBeLessThan(participationOrderBefore);
+    }).toPass({ timeout: 10_000 });
+    const membersAfter = (
+      await supabase.from("gradebook_columns").select("id").eq("group_id", created!.id).order("id")
+    ).data!.map((r) => r.id);
+    expect(membersAfter).toEqual(membersBefore);
+
+    // Delete: the group goes, its columns stay and become ungrouped.
+    await page.getByRole("button", { name: "Delete group Participation & Labs" }).click();
+    await page.getByRole("button", { name: "Confirm delete" }).click();
+    await expect(async () => {
+      const { data } = await supabase.from("gradebook_column_groups").select("id").eq("id", created!.id);
+      expect(data).toHaveLength(0);
+    }).toPass({ timeout: 10_000 });
+    expect((await columnRow("Participation")).group_id).toBeNull();
+    expect((await columnRow("Test Assignment 3")).group_id).toBeNull();
+    // The Assignment group it left is untouched.
+    const { data: assignmentGroup } = await supabase
+      .from("gradebook_column_groups")
+      .select("id")
+      .eq("id", assignmentGroupId);
+    expect(assignmentGroup).toHaveLength(1);
+  });
+});

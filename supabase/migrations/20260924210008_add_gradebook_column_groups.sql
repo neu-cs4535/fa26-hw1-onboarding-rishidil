@@ -76,9 +76,11 @@ alter table "public"."gradebook_columns" add column "group_id" bigint;
 -- The composite key, not a plain FK on group_id alone: it forces the column's own
 -- gradebook_id to equal the group's. A column can only ever point at a group in its own
 -- gradebook. NULL group_id skips the check (MATCH SIMPLE), which is what we want.
+-- SET NULL names group_id alone: a bare SET NULL on a composite key would also null the
+-- column's gradebook_id, which is NOT NULL, so deleting any group would fail.
 alter table "public"."gradebook_columns" add constraint "gradebook_columns_group_id_gradebook_id_fkey"
     foreign key ("group_id", "gradebook_id")
-    references "public"."gradebook_column_groups" ("id", "gradebook_id") on delete set null;
+    references "public"."gradebook_column_groups" ("id", "gradebook_id") on delete set null ("group_id");
 
 create index "idx_gradebook_columns_group_id"
     on "public"."gradebook_columns" ("group_id");
@@ -151,20 +153,34 @@ using (authorizeforclass(class_id));
 -- empty database and the seeder then creates gradebooks that never existed when the backfill
 -- above ran. Execute is granted to service_role only -- it is not a runtime API.
 --
--- It reproduces gradebookTable.tsx:2556-2615 exactly, including the parts that are wrong:
+-- It follows gradebookTable.tsx:2556-2615 (a run of adjacent columns with the same slug
+-- prefix is a group), except where that rule demonstrably gets the seeded cs4535 gradebook
+-- wrong. Each fix is marked FIX below:
 --
---   * `assignment-<type>-*` groups as "assignment-<type>" only with 3+ hyphen parts, so
---     `assignment-final` (2 parts) files under "Assignment" rather than "Final".
---   * A gap in sort_order ends the run, so `quiz-1,quiz-2,[gap],quiz-4,quiz-5` becomes two
---     separate groups, both displaying "Quiz".
---   * A slug with no "-" groups under the whole slug ("attendance" -> "Attendance"), not
---     under "Other".
---   * "Other" is reached only by an empty slug or one starting with "-".
+--   FIX 1  A gap in sort_order no longer ends a group. The memo required sort_order to go up
+--          by exactly 1, so deleting quiz-3 split quiz-1,quiz-2 | quiz-4,quiz-5 into two
+--          groups, both labelled "Quiz". A group is now a run of *adjacent* columns: a deleted
+--          column leaves no hole.
+--   FIX 2  Group names come from the columns' names, not a slug fragment. The memo
+--          capitalised the slug's first segment, giving "Ai" for "AI Usage Log 1/2" and
+--          "Average.hw" for "Average HW". The name is now the words every member's name starts
+--          with, minus a trailing number ("AI Usage Log", "Skill", "Quiz"), falling back to the
+--          old label only when the members share no leading word.
+--   FIX 3  A group of one is named after its column. The memo named `meets-expectations`
+--          "Meets", `does-not-meet-expectations` "Does" and `assignment-final` (Final Project)
+--          "Assignment". The table draws no header for a singleton, but the name is what the
+--          Column Groups dialog lists and what the group is called once a column joins it.
+--   FIX 4  `assignment-<word>` with two slug parts keys as "assignment-<word>", not
+--          "assignment", when <word> is not a number. Otherwise `assignment-final` merges into
+--          any adjacent column whose slug starts "assignment-" with two parts.
+--
+-- Unchanged on purpose: a slug with no "-" groups under the whole slug, "Other" is reached
+-- only by an empty slug, and every column gets a group.
 --
 -- Unclassifiable rows: there are none, and that is the stated policy. Every column gets a
 -- group, singletons included -- that is what the heuristic does, and the table simply
--- declines to draw a header for a group of one (gradebookTable.tsx:2894). Recording
--- singletons as NULL instead would be a different grouping, not the same one reproduced.
+-- declines to draw a header for a group of one. Recording singletons as NULL instead would
+-- lose FIX 3's name and make "which group is this column in" a two-case question.
 --
 -- Ordering: columns are walked by (coalesce(sort_order,0), id). The memo sorts on
 -- `sort_order ?? 0` with a stable sort, so its tiebreak is whatever order the client happened
@@ -172,6 +188,52 @@ using (authorizeforclass(class_id));
 -- stand-in. No seeded gradebook has a tie, so it cannot change the result here; on production
 -- data it makes the outcome defined rather than incidental.
 -- ---------------------------------------------------------------------------
+
+-- FIX 2 / FIX 3: a group's name from its columns' names. The words every name starts with
+-- (compared case-insensitively, kept in the first column's casing), minus trailing number
+-- tokens like "3" or "#12". NULL when nothing is shared, and the caller falls back to the
+-- slug-derived label.
+--   {"AI Usage Log 1", "AI Usage Log 2"}     -> "AI Usage Log"
+--   {"Skill #1", ..., "Skill #12"}           -> "Skill"
+--   {"Lab 1 (Group)", "Lab 2", "Lab 3"}      -> "Lab"
+--   {"Final Project"}                        -> "Final Project"
+--   {"Labs (drop lowest 2)"}                 -> "Labs (drop lowest 2)"
+create or replace function public.gradebook_group_name_from_columns(p_names text[])
+returns text
+language plpgsql
+immutable
+set search_path to 'public', 'pg_temp'
+as $function$
+declare
+    v_words text[];
+    v_other text[];
+    v_n integer;
+    v_i integer;
+    v_name text;
+begin
+    if p_names is null or coalesce(array_length(p_names, 1), 0) = 0 or p_names[1] is null then
+        return null;
+    end if;
+    v_words := regexp_split_to_array(btrim(p_names[1]), '\s+');
+    v_n := coalesce(array_length(v_words, 1), 0);
+    foreach v_name in array p_names loop
+        v_other := regexp_split_to_array(btrim(coalesce(v_name, '')), '\s+');
+        v_i := 0;
+        while v_i < least(v_n, coalesce(array_length(v_other, 1), 0))
+              and lower(v_words[v_i + 1]) = lower(v_other[v_i + 1]) loop
+            v_i := v_i + 1;
+        end loop;
+        v_n := v_i;
+    end loop;
+    while v_n > 0 and v_words[v_n] ~ '^#?[0-9]+$' loop
+        v_n := v_n - 1;
+    end loop;
+    if v_n = 0 or btrim(array_to_string(v_words[1:v_n], ' ')) = '' then
+        return null;
+    end if;
+    return array_to_string(v_words[1:v_n], ' ');
+end;
+$function$;
 
 create or replace function public.backfill_gradebook_column_groups(p_class_id bigint default null)
 returns integer
@@ -195,10 +257,16 @@ begin
             c.id,
             c.class_id,
             c.gradebook_id,
+            c.name as column_name,
             case
                 when split_part(c.slug, '-', 1) = 'assignment'
                      and array_length(string_to_array(c.slug, '-'), 1) >= 3
                 then split_part(c.slug, '-', 1) || '-' || split_part(c.slug, '-', 2)
+                -- FIX 4
+                when split_part(c.slug, '-', 1) = 'assignment'
+                     and array_length(string_to_array(c.slug, '-'), 1) = 2
+                     and split_part(c.slug, '-', 2) !~ '^[0-9]+$'
+                then c.slug
                 when split_part(c.slug, '-', 1) = '' then 'other'
                 else split_part(c.slug, '-', 1)
             end as base_group_name,
@@ -209,6 +277,10 @@ begin
                     when split_part(c.slug, '-', 1) = 'assignment'
                          and array_length(string_to_array(c.slug, '-'), 1) >= 3
                     then split_part(c.slug, '-', 1) || '-' || split_part(c.slug, '-', 2)
+                    when split_part(c.slug, '-', 1) = 'assignment'
+                         and array_length(string_to_array(c.slug, '-'), 1) = 2
+                         and split_part(c.slug, '-', 2) !~ '^[0-9]+$'
+                    then c.slug
                     when split_part(c.slug, '-', 1) = '' then 'other'
                     else split_part(c.slug, '-', 1)
                 end
@@ -218,13 +290,12 @@ begin
         window w as (partition by c.gradebook_id order by coalesce(c.sort_order, 0), c.id)
     ),
     flagged as (
-        -- A new group starts on the first column of a gradebook, on a break in sort_order
-        -- contiguity, or on a change of base group name. The memo's three conditions.
+        -- A new group starts on the first column of a gradebook or on a change of base group
+        -- name. The memo also started one on any break in sort_order contiguity (FIX 1).
         select
             walked.*,
             case
                 when prev_sort_order is null then 1
-                when effective_sort_order <> prev_sort_order + 1 then 1
                 when base_group_name <> prev_base_group_name then 1
                 else 0
             end as starts_group
@@ -263,7 +334,10 @@ begin
             min(class_id),
             gradebook_id,
             group_key,
-            min(display_name),
+            coalesce(
+                public.gradebook_group_name_from_columns(array_agg(column_name order by effective_sort_order, id)),
+                min(display_name)
+            ),
             min(effective_sort_order)
         from keyed
         group by gradebook_id, group_key

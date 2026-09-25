@@ -104,6 +104,7 @@ import {
   LuChevronDown,
   LuChevronRight,
   LuFile,
+  LuFolderTree,
   LuGripVertical,
   LuLayoutGrid,
   LuPencil,
@@ -117,6 +118,7 @@ import type { ValidationResult } from "@/lib/gradebookExpressionTester";
 import GradebookCell from "./gradebookCell";
 import { GradebookPopoverProvider, useGradebookPopover } from "./GradebookPopoverProvider";
 import ImportGradebookColumn from "./importGradebookColumn";
+import { ChangeColumnGroupDialog, ManageColumnGroupsDialog } from "./columnGroups";
 
 const GRADE_COL_WIDTH = 120;
 
@@ -1711,6 +1713,7 @@ function GradebookColumnHeader({
   const [showFilter, setShowFilter] = useState(false);
   const [isMovingLeft, setIsMovingLeft] = useState(false);
   const [isMovingRight, setIsMovingRight] = useState(false);
+  const [isChangingGroup, setIsChangingGroup] = useState(false);
   const [isReleasing, setIsReleasing] = useState(false);
   const [isUnreleasing, setIsUnreleasing] = useState(false);
   const supabase = useMemo(() => createClient(), []);
@@ -1897,6 +1900,13 @@ function GradebookColumnHeader({
 
   return (
     <VStack gap={0} alignItems="stretch" w="100%" minH="48px" height="100%">
+      {isChangingGroup && (
+        <ChangeColumnGroupDialog
+          columnId={column_id}
+          open={isChangingGroup}
+          onClose={() => setIsChangingGroup(false)}
+        />
+      )}
       {isEditing && (
         <EditColumnDialog
           columnId={column_id}
@@ -1996,6 +2006,10 @@ function GradebookColumnHeader({
               >
                 {isMovingRight ? <Spinner size="xs" mr={2} /> : <Icon as={LuArrowRight} boxSize={3} mr={2} />}
                 Move Right
+              </MenuItem>
+              <MenuItem value="changeGroup" onClick={() => setIsChangingGroup(true)}>
+                <Icon as={LuFolderTree} boxSize={3} mr={2} />
+                Change group…
               </MenuItem>
               {(!column.score_expression || column.instructor_only) && (
                 <>
@@ -2592,27 +2606,17 @@ export default function GradebookTable() {
     return groups;
   }, [cachedColumnsKey, cachedGroupsKey]);
 
-  // Initialize all groups as collapsed by default, but preserve existing collapsed state
+  // Groups start collapsed the first time the table sees them; after that the user's choice sticks.
+  // This used to re-collapse everything whenever nothing was collapsed, so "Expand all" followed by
+  // any column move (which recomputes groupedColumns) snapped every group shut again.
+  const seenGroupNamesRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     const allGroupKeys = Object.keys(groupedColumns).filter((key) => groupedColumns[key].columns.length > 1);
     const baseGroupNames = [...new Set(allGroupKeys.map((key) => groupedColumns[key].groupName))];
-    setCollapsedGroups((prev) => {
-      const newSet = new Set<string>();
-
-      // Preserve existing collapsed state for groups that still exist
-      baseGroupNames.forEach((baseGroupName) => {
-        if (prev.has(baseGroupName)) {
-          newSet.add(baseGroupName);
-        }
-      });
-
-      // If no groups were previously collapsed, collapse all by default
-      if (newSet.size === 0 && baseGroupNames.length > 0) {
-        baseGroupNames.forEach((baseGroupName) => newSet.add(baseGroupName));
-      }
-
-      return newSet;
-    });
+    const seen = seenGroupNamesRef.current;
+    const firstSeen = new Set(baseGroupNames.filter((name) => !seen.has(name)));
+    baseGroupNames.forEach((baseGroupName) => seen.add(baseGroupName));
+    setCollapsedGroups((prev) => new Set(baseGroupNames.filter((name) => prev.has(name) || firstSeen.has(name))));
   }, [groupedColumns]);
 
   // Force recalculation helper
@@ -3949,6 +3953,7 @@ export default function GradebookTable() {
                 </PopoverBody>
               </PopoverContent>
             </PopoverRoot>
+            <ManageColumnGroupsDialog />
             <ImportGradebookColumn />
             <AddColumnDialog />
           </HStack>

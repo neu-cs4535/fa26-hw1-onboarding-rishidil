@@ -11833,6 +11833,56 @@ export type Database = {
         Args: { p_submission_id: number };
         Returns: string[];
       };
+      _gradebook_apply_column_order: {
+        Args: { p_gradebook_id: number; p_ids: number[] };
+        Returns: undefined;
+      };
+      _gradebook_column_groups_authorize: {
+        Args: { p_gradebook_id: number };
+        Returns: undefined;
+      };
+      _gradebook_column_order: {
+        Args: { p_gradebook_id: number };
+        Returns: number[];
+      };
+      _gradebook_column_step: {
+        Args: { p_column_id: number; p_direction: number };
+        Returns: {
+          class_id: number;
+          created_at: string;
+          dependencies: Json | null;
+          description: string | null;
+          external_data: Json | null;
+          gradebook_id: number;
+          group_id: number | null;
+          id: number;
+          instructor_only: boolean;
+          max_score: number | null;
+          name: string;
+          released: boolean;
+          render_expression: string | null;
+          score_expression: string | null;
+          show_calculated_ranges: boolean;
+          show_max_score: boolean;
+          slug: string;
+          sort_order: number | null;
+          updated_at: string;
+        };
+        SetofOptions: {
+          from: "*";
+          to: "gradebook_columns";
+          isOneToOne: true;
+          isSetofReturn: false;
+        };
+      };
+      _gradebook_column_units: {
+        Args: { p_gradebook_id: number };
+        Returns: string[];
+      };
+      _gradebook_columns_for_units: {
+        Args: { p_gradebook_id: number; p_units: string[] };
+        Returns: number[];
+      };
       _help_request_public_payload: {
         Args: {
           new_row: Database["public"]["Tables"]["help_requests"]["Row"];
@@ -13465,6 +13515,22 @@ export type Database = {
         Args: { p_gradebook_id: number };
         Returns: undefined;
       };
+      gradebook_column_group_create: {
+        Args: { p_column_id: number; p_name: string };
+        Returns: number;
+      };
+      gradebook_column_group_delete: {
+        Args: { p_group_id: number };
+        Returns: undefined;
+      };
+      gradebook_column_group_move: {
+        Args: { p_direction: number; p_group_id: number };
+        Returns: undefined;
+      };
+      gradebook_column_group_rename: {
+        Args: { p_group_id: number; p_name: string };
+        Returns: undefined;
+      };
       gradebook_column_move_left: {
         Args: { p_column_id: number };
         Returns: {
@@ -13525,9 +13591,17 @@ export type Database = {
           isSetofReturn: false;
         };
       };
+      gradebook_column_set_group: {
+        Args: { p_column_id: number; p_group_id: number };
+        Returns: undefined;
+      };
       gradebook_columns_reorder: {
         Args: { p_ordered_column_ids: number[] };
         Returns: undefined;
+      };
+      gradebook_group_name_from_columns: {
+        Args: { p_names: string[] };
+        Returns: string;
       };
       help_request_is_private: {
         Args: { p_help_request_id: number };

@@ -3514,6 +3514,14 @@ export async function createAssignmentsAndGradebookColumns({
     }
   }
 
+  // Columns created here postdate the migration that grouped existing gradebooks, so they start
+  // ungrouped. Group them the way the seeder does (scripts/DatabaseSeedingUtils.ts), through the
+  // same function the migration calls. No-op if the gradebook already has groups.
+  const { error: groupError } = await supabase.rpc("backfill_gradebook_column_groups", { p_class_id: class_id });
+  if (groupError) {
+    throw new Error(`Failed to group gradebook columns for class ${class_id}: ${groupError.message}`);
+  }
+
   return {
     assignments,
     gradebookColumns,
